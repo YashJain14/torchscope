@@ -1,0 +1,29 @@
+[build-system]
+requires      = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.backends.legacy:build"
+
+[project]
+name        = "torchscope"
+version     = "0.1.0"
+description = "Lightweight PyTorch GPU observability toolkit"
+readme      = "README.md"
+requires-python = ">=3.10"
+license     = {text = "MIT"}
+authors     = [{name = "Yash Jain"}]
+
+dependencies = [
+    "plotly>=5.0",
+    "jinja2>=3.0",
+]
+
+[project.optional-dependencies]
+nvml       = ["pynvml>=11.0"]
+prometheus = ["prometheus-client>=0.17"]
+full       = ["pynvml>=11.0", "prometheus-client>=0.17"]
+
+[project.scripts]
+torchscope = "torchscope.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["torchscope*"]
