@@ -96,3 +96,4 @@ dmypy.json
 *.ndjson
 *.csv
 torchscope_report.html
+torchscope_implementation_plan.md
