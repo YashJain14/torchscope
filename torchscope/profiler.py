@@ -89,6 +89,7 @@ class Profiler:
         job_name:    str            = "torchscope",
         run_id:      str            = "",
         rank:        int            = 0,
+        nccl_mode:   Optional[str]  = None,
     ):
         self.device   = device
         self.job_name = job_name
@@ -99,6 +100,14 @@ class Profiler:
         self.memory = MemoryCollector(interval=interval, device=device)
         self.comm   = CommCollector()
         self.tracer = KernelTracer()
+
+        self.nccl: Optional[object] = None
+        if nccl_mode:
+            try:
+                from .collectors.nccl import NCCLCollector
+                self.nccl = NCCLCollector(mode=nccl_mode)
+            except Exception:
+                pass
 
         # exporters
         self._json_exp: Optional[JSONExporter] = (
@@ -136,6 +145,8 @@ class Profiler:
     def start(self) -> "Profiler":
         self.gpu.start()
         self.memory.start()
+        if self.nccl:
+            self.nccl.start()
         self._active   = True
         self._start_ts = time.time()
         print(f"torchscope: profiling started  "
@@ -147,6 +158,8 @@ class Profiler:
             return self
         self.gpu.stop()
         self.memory.stop()
+        if self.nccl:
+            self.nccl.stop()
         self._active = False
         elapsed = time.time() - self._start_ts if self._start_ts else 0
         print(f"torchscope: profiling stopped  "
@@ -228,12 +241,15 @@ class Profiler:
             "flop_summary":      self.tracer.flop_summary(),
         }
 
+        nccl_sum = self.nccl.summary() if self.nccl else {}
+
         analyzer = BottleneckAnalyzer(
             gpu           = gpu_sum,
             memory        = mem_sum,
             comm          = comm_sum,
             tracer        = tracer_data,
             custom_stages = custom_stages or {},
+            nccl          = nccl_sum,
         )
         analysis = analyzer.analyze()
         analysis["_gpu_summary"] = gpu_sum   # forwarded to HTMLExporter for KPIs

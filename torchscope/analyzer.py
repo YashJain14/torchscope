@@ -25,6 +25,13 @@ _T = {
     "thermal_pct":          30,    # % of samples above thermal_temp_c
     "comm_pct":             15,    # communication > this % of step time
     "frag_pct":             30,    # memory fragmentation above this %
+    # NCCL collective rules
+    "nccl_allreduce_dominant_pct": 60,       # all-reduce > this % of collective time
+    "nccl_small_message_bytes":    1_048_576, # avg message below 1 MB → inefficient chunking
+    # Cluster-level rules (Ray multi-worker)
+    "cluster_imbalance_pct":    20,  # one worker util > this % below cluster mean
+    "cluster_low_avg_util":     40,  # cluster-wide avg util below this
+    "cluster_mem_pressure_pct": 85,  # any worker memory_used_pct above this
 }
 
 _SEV = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
@@ -56,12 +63,16 @@ class BottleneckAnalyzer:
         comm:          dict = None,
         tracer:        dict = None,
         custom_stages: dict = None,
+        nccl:          dict = None,
+        cluster:       dict = None,
     ):
-        self.gpu    = gpu    or {}
-        self.mem    = memory or {}
-        self.comm   = comm   or {}
-        self.tracer = tracer or {}
-        self.stages = custom_stages or {}
+        self.gpu     = gpu     or {}
+        self.mem     = memory  or {}
+        self.comm    = comm    or {}
+        self.tracer  = tracer  or {}
+        self.stages  = custom_stages or {}
+        self.nccl    = nccl    or {}
+        self.cluster = cluster or {}
 
     # ── public ────────────────────────────────────────────────────────────────
 
@@ -81,6 +92,11 @@ class BottleneckAnalyzer:
         self._check_comm_overhead(findings, recs)
         self._check_stragglers(findings, recs)
         self._check_custom_stages(findings, recs)
+        self._check_nccl_allreduce_dominant(findings, recs)
+        self._check_nccl_small_message(findings, recs)
+        self._check_cluster_imbalance(findings, recs)
+        self._check_cluster_low_util(findings, recs)
+        self._check_cluster_mem_pressure(findings, recs)
 
         findings.sort(key=lambda f: _SEV.get(f["severity"], 9))
 
@@ -298,6 +314,91 @@ class BottleneckAnalyzer:
                 f"Profile this stage independently and consider parallelising, "
                 f"caching, or moving it to a faster device."
             )
+
+
+    # ── NCCL collective analysis ──────────────────────────────────────────────
+
+    def _check_nccl_allreduce_dominant(self, F, R):
+        if not self.nccl:
+            return
+        dom = self.nccl.get("dominant_collective", "")
+        pct = self.nccl.get("dominant_pct", 0)
+        n   = self.nccl.get("n_events", 0)
+        if n == 0 or dom != "all_reduce" or pct <= _T["nccl_allreduce_dominant_pct"]:
+            return
+        ar_ms = self.nccl.get("allreduce_ms", 0)
+        F.append(_f("NCCL_ALLREDUCE_DOMINANT", "MEDIUM",
+            f"AllReduce accounts for {pct:.1f}% of collective time "
+            f"({ar_ms:.1f} ms total across {n} events)."))
+        R.append(
+            f"AllReduce dominates NCCL traffic ({pct:.0f}%). Consider: increase "
+            f"DDP bucket_cap_mb (default 25 MB → try 100–200 MB) to reduce collective "
+            f"count, use gradient compression (PowerSGD), or switch to FSDP with "
+            f"ZeRO-2/3 to overlap communication with backward."
+        )
+
+    def _check_nccl_small_message(self, F, R):
+        if not self.nccl:
+            return
+        avg  = self.nccl.get("avg_message_size_bytes", -1)
+        n    = self.nccl.get("n_events", 0)
+        if n == 0 or avg < 0 or avg >= _T["nccl_small_message_bytes"]:
+            return
+        avg_kb = avg / 1024
+        F.append(_f("NCCL_SMALL_MESSAGE", "MEDIUM",
+            f"Average NCCL message size is {avg_kb:.1f} KB — below the 1 MB "
+            f"efficient threshold. Small messages have high per-operation overhead."))
+        R.append(
+            f"Average collective message {avg_kb:.0f} KB is below efficient range. "
+            f"Increase DDP bucket_cap_mb to batch more gradients per AllReduce, "
+            f"or use gradient accumulation to reduce AllReduce frequency."
+        )
+
+    # ── cluster-level analysis (Ray multi-worker) ─────────────────────────────
+
+    def _check_cluster_imbalance(self, F, R):
+        imb = self.cluster.get("imbalance_pct", 0)
+        wid = self.cluster.get("bottleneck_worker_id", -1)
+        util = self.cluster.get("bottleneck_avg_util", -1)
+        if imb <= _T["cluster_imbalance_pct"]:
+            return
+        F.append(_f("CLUSTER_IMBALANCE", "HIGH",
+            f"Worker {wid} has {util:.1f}% avg GPU util — {imb:.1f}% below "
+            f"cluster mean. Cluster throughput is straggler-bound."))
+        R.append(
+            f"Worker {wid} is the cluster bottleneck ({imb:.0f}% imbalance). "
+            f"Check: uneven data sharding, thermal throttling on that node, "
+            f"or a slower interconnect. Use Ray's placement groups to isolate "
+            f"homogeneous hardware."
+        )
+
+    def _check_cluster_low_util(self, F, R):
+        avg = self.cluster.get("cluster_avg_gpu_util", -1)
+        if avg < 0 or avg >= _T["cluster_low_avg_util"]:
+            return
+        n = len(self.cluster.get("worker_utils", {}))
+        F.append(_f("CLUSTER_LOW_GPU_UTIL", "MEDIUM",
+            f"Cluster-wide average GPU utilization is {avg:.1f}% "
+            f"across {n} workers — below the {_T['cluster_low_avg_util']}% threshold."))
+        R.append(
+            f"Cluster avg GPU util is only {avg:.0f}%. Consider larger per-worker "
+            f"batch sizes, async data loading, or reducing the number of workers "
+            f"to increase per-worker utilization."
+        )
+
+    def _check_cluster_mem_pressure(self, F, R):
+        pressured = self.cluster.get("pressured_workers", [])
+        if not pressured:
+            return
+        pct = _T["cluster_mem_pressure_pct"]
+        F.append(_f("CLUSTER_MEM_PRESSURE", "MEDIUM",
+            f"{len(pressured)} worker(s) above {pct}% memory utilization: "
+            f"{pressured}. OOM risk if memory grows further."))
+        R.append(
+            f"Workers {pressured} are near memory capacity. Enable gradient "
+            f"checkpointing, reduce per-worker batch size, or use FSDP to "
+            f"shard model state across workers."
+        )
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────

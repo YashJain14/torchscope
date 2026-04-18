@@ -1,0 +1,12 @@
+apiVersion: v2
+name: torchscope-sidecar
+description: Kubernetes sidecar that exports GPU metrics to Prometheus without modifying training code
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - gpu
+  - observability
+  - pytorch
+  - prometheus
+  - ml-infra

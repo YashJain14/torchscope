@@ -1,0 +1,65 @@
+{{- /*
+  torchscope-sidecar — injects a GPU metrics sidecar into ML training pods.
+  The sidecar requires no changes to training code; it runs pynvml independently.
+*/ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "torchscope-sidecar.fullname" . }}
+  labels:
+    {{- include "torchscope-sidecar.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- toYaml .Values.targetPodLabels | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- toYaml .Values.targetPodLabels | nindent 8 }}
+      {{- if .Values.prometheusAnnotations.enabled }}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port:   "{{ .Values.sidecar.port }}"
+        prometheus.io/path:   "/metrics"
+        prometheus.io/interval: "{{ .Values.prometheusAnnotations.scrapeInterval }}"
+      {{- end }}
+    spec:
+      containers:
+        - name: torchscope-sidecar
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.sidecar.port }}
+              protocol: TCP
+          env:
+            - name: TORCHSCOPE_PORT
+              value: "{{ .Values.sidecar.port }}"
+            - name: TORCHSCOPE_INTERVAL
+              value: "{{ .Values.sidecar.interval }}"
+            - name: TORCHSCOPE_JOB_NAME
+              value: "{{ .Values.sidecar.jobName }}"
+            - name: TORCHSCOPE_RANK
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['rank']
+            {{- if .Values.sidecar.gpuIds }}
+            - name: TORCHSCOPE_GPU_IDS
+              value: "{{ .Values.sidecar.gpuIds }}"
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.sidecar.port }}
+            initialDelaySeconds: 5
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: {{ .Values.sidecar.port }}
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}

@@ -1,0 +1,29 @@
+# Default values for torchscope-sidecar Helm chart.
+
+image:
+  repository: torchscope-sidecar
+  tag: "0.1.0"
+  pullPolicy: IfNotPresent
+
+sidecar:
+  port: 9000
+  interval: "0.5"
+  jobName: "torchscope"
+  # gpuIds: "0,1"  # uncomment to restrict to specific GPU indices
+
+resources:
+  limits:
+    cpu: "200m"
+    memory: "128Mi"
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+
+# Labels that identify pods to inject the sidecar into
+targetPodLabels:
+  app: ml-training
+
+# Prometheus scrape annotations added to the pod
+prometheusAnnotations:
+  enabled: true
+  scrapeInterval: "15s"
